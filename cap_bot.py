@@ -130,8 +130,6 @@ def get_stats_by_offer(offer_ids, days=90):
     date_to   = datetime.now().strftime("%Y-%m-%d")
     payload = {
         "range": {"from": date_from, "to": date_to, "timezone": "Europe/Kyiv"},
-        "filters": [{"name": "offer_id", "operator": "IN",
-                     "expression": [str(i) for i in offer_ids]}],
         "grouping": ["offer_id"],
         "metrics": ["sales", "deposits", "cost"],
     }
@@ -140,11 +138,12 @@ def get_stats_by_offer(offer_ids, days=90):
     result = {}
     for row in r.json().get("rows", []):
         oid = int(row.get("offer_id", 0))
-        result[oid] = {
-            "sales":    int(row.get("sales",    0) or 0),
-            "deposits": int(row.get("deposits", 0) or 0),
-            "cost":     float(row.get("cost",   0) or 0),
-        }
+        if oid in offer_ids:
+            result[oid] = {
+                "sales":    int(row.get("sales",    0) or 0),
+                "deposits": int(row.get("deposits", 0) or 0),
+                "cost":     float(row.get("cost",   0) or 0),
+            }
     return result
 
 def get_today_stats_by_offer(offer_ids):
@@ -155,8 +154,6 @@ def get_today_stats_by_offer(offer_ids):
     today = datetime.now().strftime("%Y-%m-%d")
     payload = {
         "range": {"from": today, "to": today, "timezone": "Europe/Kyiv"},
-        "filters": [{"name": "offer_id", "operator": "IN",
-                     "expression": [str(i) for i in offer_ids]}],
         "grouping": ["offer_id"],
         "metrics": ["sales", "deposits"],
     }
@@ -165,10 +162,11 @@ def get_today_stats_by_offer(offer_ids):
     result = {}
     for row in r.json().get("rows", []):
         oid = int(row.get("offer_id", 0))
-        result[oid] = {
-            "sales":    int(row.get("sales",    0) or 0),
-            "deposits": int(row.get("deposits", 0) or 0),
-        }
+        if oid in offer_ids:
+            result[oid] = {
+                "sales":    int(row.get("sales",    0) or 0),
+                "deposits": int(row.get("deposits", 0) or 0),
+            }
     return result
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
