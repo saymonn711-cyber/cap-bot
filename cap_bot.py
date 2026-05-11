@@ -57,18 +57,20 @@ NOTION_HEADERS = {
 }
 
 def find_notion_user(query: str) -> dict | None:
-    """Ищет пользователя Notion по имени или email"""
-    url = "https://api.notion.com/v1/users"
+    """Ищет пользователя по тегу из маппинга BUYERS. Мгновенно."""
+    tag = query.strip().lower()
+    notion_id = None
+    for buyer_tag, buyer_id in BUYERS.items():
+        if tag == buyer_tag.lower():
+            notion_id = buyer_id
+            break
+    if not notion_id:
+        return None
+    url = f"https://api.notion.com/v1/users/{notion_id}"
     r = requests.get(url, headers=NOTION_HEADERS, timeout=15)
-    r.raise_for_status()
-    users = r.json().get("results", [])
-    q = query.lower().strip()
-    for u in users:
-        name  = (u.get("name") or "").lower()
-        email = (u.get("person", {}).get("email") or "").lower()
-        if q in name or q in email or name in q:
-            return u
-    return None
+    if r.status_code == 200:
+        return r.json()
+    return {"id": notion_id, "name": tag}
 
 def get_streams_for_buyer(buyer_notion_id: str) -> list[dict]:
     """Возвращает потоки байера со статусами Запущен / Не запущен / Холд"""
