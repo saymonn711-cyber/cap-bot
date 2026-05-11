@@ -134,10 +134,10 @@ def set_notion_status(page_id, status):
 # ─── KEITARO ──────────────────────────────────────────────────────────────────
 def get_all_campaigns():
     headers = {"Api-Key": KEITARO_KEY}
-    r = requests.get(f"{KEITARO_URL}/admin_api/v1/campaigns", headers=headers, timeout=15)
+    r = requests.get(f"{KEITARO_URL}/admin_api/v1/offers", headers=headers, timeout=15)
     r.raise_for_status()
     camps = r.json()
-    log.info(f"Keitaro: {len(camps)} кампаний")
+    log.info(f"Keitaro: {len(camps)} офферов")
     return camps
 
 def get_stats(campaign_ids, days=90):
@@ -149,16 +149,16 @@ def get_stats(campaign_ids, days=90):
     date_to   = datetime.now().strftime("%Y-%m-%d")
     payload = {
         "range": {"from": date_from, "to": date_to, "timezone": "Europe/Kyiv"},
-        "filters": [{"name": "campaign_id", "operator": "IN",
+        "filters": [{"name": "offer_id", "operator": "IN",
                      "expression": [str(i) for i in campaign_ids]}],
-        "grouping": ["campaign_id"],
+        "grouping": ["offer_id"],
         "metrics": ["sales", "deposits", "cost"],
     }
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     r.raise_for_status()
     result = {}
     for row in r.json().get("rows", []):
-        cid = int(row.get("campaign_id", 0))
+        cid = int(row.get("offer_id", 0))
         result[cid] = {
             "sales":    int(row.get("sales",    0) or 0),
             "deposits": int(row.get("deposits", 0) or 0),
@@ -175,16 +175,16 @@ def get_today_stats(campaign_ids):
     today = datetime.now().strftime("%Y-%m-%d")
     payload = {
         "range": {"from": today, "to": today, "timezone": "Europe/Kyiv"},
-        "filters": [{"name": "campaign_id", "operator": "IN",
+        "filters": [{"name": "offer_id", "operator": "IN",
                      "expression": [str(i) for i in campaign_ids]}],
-        "grouping": ["campaign_id"],
+        "grouping": ["offer_id"],
         "metrics": ["sales", "deposits"],
     }
     r = requests.post(url, headers=headers, json=payload, timeout=30)
     r.raise_for_status()
     result = {}
     for row in r.json().get("rows", []):
-        cid = int(row.get("campaign_id", 0))
+        cid = int(row.get("offer_id", 0))
         result[cid] = {
             "sales":    int(row.get("sales",    0) or 0),
             "deposits": int(row.get("deposits", 0) or 0),
