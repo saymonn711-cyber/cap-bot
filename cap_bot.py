@@ -137,24 +137,20 @@ def set_notion_status(page_id: str, status: str):
     r.raise_for_status()
 
 # ─── KEITARO ──────────────────────────────────────────────────────────────────
-def get_group_id(group_name: str):
-    headers = {"Api-Key": KEITARO_KEY}
-    r = requests.get(f"{KEITARO_URL}/admin_api/v1/groups", headers=headers, timeout=15)
-    r.raise_for_status()
-    for g in r.json():
-        if g.get("name", "").lower() == group_name.lower():
-            return str(g["id"])
-    return None
-
 def get_campaigns_by_group(group_name: str):
+    """
+    Получает кампании из Keitaro и фильтрует по email аккаунта в названии.
+    Название кампании: LN-13397; KR; Gambloria; T20; ; tetriss_mb@044.agency;
+    group_name = тег байера (например tetriss_mb) — ищем его в названии.
+    """
     headers = {"Api-Key": KEITARO_KEY}
-    group_id = get_group_id(group_name)
     r = requests.get(f"{KEITARO_URL}/admin_api/v1/campaigns", headers=headers, timeout=15)
     r.raise_for_status()
     all_camps = r.json()
-    if group_id:
-        return [c for c in all_camps if str(c.get("group_id", "")) == group_id]
-    return all_camps
+    tag = group_name.lower()
+    filtered = [c for c in all_camps if tag in c.get("name", "").lower()]
+    log.info(f"Кампаний для '{group_name}': {len(filtered)} из {len(all_camps)}")
+    return filtered
 
 def get_stats(campaign_ids, days=90):
     if not campaign_ids:
@@ -423,4 +419,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
