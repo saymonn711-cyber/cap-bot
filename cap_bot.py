@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Cap Bot — Telegram бот для проверки кап байерами
-"""
+"""Cap Bot — проверка кап через офферы Keitaro"""
 
 import os, re, json, time, logging, requests, sys
 from datetime import datetime, timedelta
@@ -19,8 +17,6 @@ NOTION_TOKEN = require_env("NOTION_TOKEN")
 NOTION_DB_ID = require_env("NOTION_DB_ID")
 TG_BOT_TOKEN = require_env("TG_BOT_TOKEN")
 
-# Маппинг тег → Notion User ID
-# Чтобы добавить байера: "тег": "notion-uuid"
 BUYERS = {
     "tetriss_mb": "561afa0f-0a44-4221-acda-e2f8f3e98e2e",
 }
@@ -28,14 +24,8 @@ BUYERS = {
 USERS_FILE      = "cap_bot_users.json"
 NO_TRAFFIC_DAYS = 7
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("cap_bot.log", encoding="utf-8"),
-    ]
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("cap_bot.log", encoding="utf-8")])
 log = logging.getLogger(__name__)
 
 NOTION_HEADERS = {
@@ -44,7 +34,6 @@ NOTION_HEADERS = {
     "Content-Type": "application/json",
 }
 
-# ─── USERS ────────────────────────────────────────────────────────────────────
 def load_users():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, encoding="utf-8") as f:
@@ -55,12 +44,7 @@ def save_users(users):
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, indent=2, ensure_ascii=False)
 
-# ─── CAP PARSER ───────────────────────────────────────────────────────────────
 def parse_cap(raw):
-    """
-    T20 / 20 FTD  → {"type": "total", "value": 20}
-    D5 / daily 5  → {"type": "daily", "value": 5}
-    """
     raw = raw.strip().upper()
     nums = re.findall(r"\d+", raw)
     if not nums:
@@ -76,13 +60,11 @@ def get_streams_for_buyer(buyer_notion_id):
     payload = {
         "filter": {
             "and": [
-                {
-                    "or": [
-                        {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                        {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                        {"property": "Баер статус", "select": {"equals": "Холд"}},
-                    ]
-                },
+                {"or": [
+                    {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                    {"property": "Баер статус", "select": {"equals": "Не запущен"}},
+                    {"property": "Баер статус", "select": {"equals": "Холд"}},
+                ]},
                 {"property": "Ответственный", "people": {"contains": buyer_notion_id}}
             ]
         }
@@ -106,7 +88,6 @@ def get_streams_for_buyer(buyer_notion_id):
             cap_prop = props.get("Cap", {})
             if cap_prop.get("type") == "rich_text" and cap_prop.get("rich_text"):
                 cap_raw = cap_prop["rich_text"][0]["plain_text"]
-            cap_info = parse_cap(cap_raw)
             status = ""
             st = props.get("Баер статус", {})
             if st.get("select"):
@@ -114,7 +95,7 @@ def get_streams_for_buyer(buyer_notion_id):
             streams.append({
                 "notion_id":  page["id"],
                 "ln_id":      ln_id,
-                "cap":        cap_info,
+                "cap":        parse_cap(cap_raw),
                 "cap_raw":    cap_raw,
                 "status":     status,
                 "notion_url": page["url"],
@@ -132,16 +113,16 @@ def set_notion_status(page_id, status):
     r.raise_for_status()
 
 # ─── KEITARO ──────────────────────────────────────────────────────────────────
-def get_all_campaigns():
+def get_all_offers():
     headers = {"Api-Key": KEITARO_KEY}
     r = requests.get(f"{KEITARO_URL}/admin_api/v1/offers", headers=headers, timeout=15)
     r.raise_for_status()
-    camps = r.json()
-    log.info(f"Keitaro: {len(camps)} офферов")
-    return camps
+    offers = r.json()
+    log.info(f"Keitaro: {len(offers)} офферов")
+    return offers
 
-def get_stats(campaign_ids, days=90):
-    if not campaign_ids:
+def get_stats_by_offer(offer_ids, days=90):
+    if not offer_ids:
         return {}
     url = f"{KEITARO_URL}/admin_api/v1/report/build"
     headers = {"Api-Key": KEITARO_KEY, "Content-Type": "application/json"}
@@ -150,7 +131,7 @@ def get_stats(campaign_ids, days=90):
     payload = {
         "range": {"from": date_from, "to": date_to, "timezone": "Europe/Kyiv"},
         "filters": [{"name": "offer_id", "operator": "IN",
-                     "expression": [str(i) for i in campaign_ids]}],
+                     "expression": [str(i) for i in offer_ids]}],
         "grouping": ["offer_id"],
         "metrics": ["sales", "deposits", "cost"],
     }
@@ -158,17 +139,16 @@ def get_stats(campaign_ids, days=90):
     r.raise_for_status()
     result = {}
     for row in r.json().get("rows", []):
-        cid = int(row.get("offer_id", 0))
-        result[cid] = {
+        oid = int(row.get("offer_id", 0))
+        result[oid] = {
             "sales":    int(row.get("sales",    0) or 0),
             "deposits": int(row.get("deposits", 0) or 0),
             "cost":     float(row.get("cost",   0) or 0),
         }
     return result
 
-def get_today_stats(campaign_ids):
-    """Статистика за сегодня для дейли кап"""
-    if not campaign_ids:
+def get_today_stats_by_offer(offer_ids):
+    if not offer_ids:
         return {}
     url = f"{KEITARO_URL}/admin_api/v1/report/build"
     headers = {"Api-Key": KEITARO_KEY, "Content-Type": "application/json"}
@@ -176,7 +156,7 @@ def get_today_stats(campaign_ids):
     payload = {
         "range": {"from": today, "to": today, "timezone": "Europe/Kyiv"},
         "filters": [{"name": "offer_id", "operator": "IN",
-                     "expression": [str(i) for i in campaign_ids]}],
+                     "expression": [str(i) for i in offer_ids]}],
         "grouping": ["offer_id"],
         "metrics": ["sales", "deposits"],
     }
@@ -184,8 +164,8 @@ def get_today_stats(campaign_ids):
     r.raise_for_status()
     result = {}
     for row in r.json().get("rows", []):
-        cid = int(row.get("offer_id", 0))
-        result[cid] = {
+        oid = int(row.get("offer_id", 0))
+        result[oid] = {
             "sales":    int(row.get("sales",    0) or 0),
             "deposits": int(row.get("deposits", 0) or 0),
         }
@@ -231,44 +211,42 @@ def check_caps_for_user(buyer_notion_id, tag):
 
     log.info(f"Потоков из Notion: {len(streams)}")
 
-    all_campaigns = get_all_campaigns()
-
-    # Матчим LN-XXXXX → [campaign_id, ...]
-    ln_to_cids = {}
-    for c in all_campaigns:
-        name = c.get("name", "")
+    # Получаем все офферы и строим LN → [offer_id, ...]
+    all_offers = get_all_offers()
+    ln_to_offer_ids = {}
+    for o in all_offers:
+        name = o.get("name", "")
         m = re.match(r"^(LN-\d+)", name)
         if m:
             ln = m.group(1)
-            ln_to_cids.setdefault(ln, []).append(int(c["id"]))
+            ln_to_offer_ids.setdefault(ln, []).append(int(o["id"]))
 
-    log.info(f"LN в Keitaro: {len(ln_to_cids)}")
+    log.info(f"LN в офферах: {len(ln_to_offer_ids)}")
 
-    # Собираем все cid
-    all_cids = list({cid for s in streams for cid in ln_to_cids.get(s["ln_id"], [])})
+    # Собираем все offer_id нужных потоков
+    all_offer_ids = list({oid for s in streams for oid in ln_to_offer_ids.get(s["ln_id"], [])})
 
-    stats_all   = get_stats(all_cids, days=90)
-    stats_today = get_today_stats(all_cids)
-    stats_7d    = get_stats(all_cids, days=NO_TRAFFIC_DAYS)
+    stats_all   = get_stats_by_offer(all_offer_ids, days=90)
+    stats_today = get_today_stats_by_offer(all_offer_ids)
+    stats_7d    = get_stats_by_offer(all_offer_ids, days=NO_TRAFFIC_DAYS)
 
     lines = [f"📊 <b>Отчёт по капам</b> — {tag}\n"]
     actions = []
 
     for s in streams:
-        ln_id    = s["ln_id"]
-        cap_info = s["cap"]
-        cap_raw  = s["cap_raw"] if s["cap_raw"] else "?"
-        cids     = ln_to_cids.get(ln_id, [])
-        link     = f'<a href="{s["notion_url"]}">{ln_id}</a>'
+        ln_id     = s["ln_id"]
+        cap_info  = s["cap"]
+        cap_raw   = s["cap_raw"] if s["cap_raw"] else "?"
+        offer_ids = ln_to_offer_ids.get(ln_id, [])
+        link      = f'<a href="{s["notion_url"]}">{ln_id}</a>'
 
-        if not cids:
+        if not offer_ids:
             lines.append(f"⚪ {link} — нет в Keitaro")
             continue
 
-        # Если капы нет — просто показываем тотал
         if not cap_info:
-            total = sum(stats_all.get(c, {}).get("sales", 0) +
-                       stats_all.get(c, {}).get("deposits", 0) for c in cids)
+            total = sum(stats_all.get(o, {}).get("sales", 0) +
+                       stats_all.get(o, {}).get("deposits", 0) for o in offer_ids)
             lines.append(f"⚪ {link} — тотал: {total} (капа не указана)")
             continue
 
@@ -276,15 +254,15 @@ def check_caps_for_user(buyer_notion_id, tag):
         cap_val  = cap_info["value"]
 
         if cap_type == "daily":
-            actual = sum(stats_today.get(c, {}).get("sales", 0) +
-                        stats_today.get(c, {}).get("deposits", 0) for c in cids)
+            actual = sum(stats_today.get(o, {}).get("sales", 0) +
+                        stats_today.get(o, {}).get("deposits", 0) for o in offer_ids)
             period = "сегодня"
         else:
-            actual = sum(stats_all.get(c, {}).get("sales", 0) +
-                        stats_all.get(c, {}).get("deposits", 0) for c in cids)
+            actual = sum(stats_all.get(o, {}).get("sales", 0) +
+                        stats_all.get(o, {}).get("deposits", 0) for o in offer_ids)
             period = "тотал"
 
-        cost_7d   = sum(stats_7d.get(c, {}).get("cost", 0) for c in cids)
+        cost_7d   = sum(stats_7d.get(o, {}).get("cost", 0) for o in offer_ids)
         remaining = cap_val - actual
         pct       = actual / cap_val if cap_val else 0
 
@@ -338,12 +316,12 @@ def handle_message(msg, users, states):
         return
 
     if text == "/debug":
-        tg_send(chat_id, "⏳ Получаю кампании из Keitaro...")
+        tg_send(chat_id, "⏳ Получаю офферы из Keitaro...")
         try:
-            camps = get_all_campaigns()
-            names = [c.get("name", "") for c in camps[:10]]
-            msg_text = f"Всего: {len(camps)}\n\nПервые 10:\n" + "\n".join(f"• {n}" for n in names)
-            tg_send(chat_id, msg_text)
+            offers = get_all_offers()
+            names  = [o.get("name", "") for o in offers[:10]]
+            tg_send(chat_id, f"Всего офферов: {len(offers)}\n\nПервые 10:\n" +
+                    "\n".join(f"• {n}" for n in names))
         except Exception as e:
             tg_send(chat_id, f"❌ {e}")
         return
@@ -357,10 +335,9 @@ def handle_message(msg, users, states):
         tg_send(chat_id, "⏳ Загружаю данные...")
         try:
             report, actions = check_caps_for_user(user["notion_id"], user["tag"])
-            keyboard = build_keyboard(actions)
-            tg_send(chat_id, report, reply_markup=keyboard)
+            tg_send(chat_id, report, reply_markup=build_keyboard(actions))
         except Exception as e:
-            log.error(f"check_caps error: {e}")
+            log.error(f"check_caps: {e}")
             tg_send(chat_id, f"❌ Ошибка: {e}")
         return
 
@@ -368,24 +345,21 @@ def handle_message(msg, users, states):
         tag = text.strip().lower()
         if tag not in BUYERS:
             known = ", ".join(f"<code>{t}</code>" for t in BUYERS.keys())
-            tg_send(chat_id, f"❌ Тег <b>{text}</b> не найден.\nДоступные: {known}\n\nПопробуй ещё раз:")
+            tg_send(chat_id, f"❌ Тег <b>{text}</b> не найден.\nДоступные: {known}")
             return
         users[chat_id] = {"tag": tag, "notion_id": BUYERS[tag]}
         states[chat_id] = STATE_IDLE
         save_users(users)
-        tg_send(chat_id, f"✅ Готово! Тег: <b>{tag}</b>\n\nНажми 🔍 Проверить капы",
-                reply_markup=main_keyboard())
+        tg_send(chat_id, f"✅ Готово! Тег: <b>{tag}</b>", reply_markup=main_keyboard())
         return
 
     tg_send(chat_id, "Используй кнопки 👇", reply_markup=main_keyboard())
 
-
 def handle_callback(cb, users):
-    chat_id  = str(cb["message"]["chat"]["id"])
-    msg_id   = cb["message"]["message_id"]
-    cbq_id   = cb["id"]
-    data     = cb.get("data", "")
-    parts    = data.split(":", 2)
+    chat_id = str(cb["message"]["chat"]["id"])
+    msg_id  = cb["message"]["message_id"]
+    cbq_id  = cb["id"]
+    parts   = cb.get("data", "").split(":", 2)
     if len(parts) != 3:
         answer_callback(cbq_id, "Ошибка")
         return
@@ -407,7 +381,6 @@ def handle_callback(cb, users):
         except Exception as e:
             answer_callback(cbq_id, f"Ошибка: {e}")
 
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     log.info("🤖 Cap Bot запущен")
     users  = load_users()
@@ -415,8 +388,8 @@ def main():
     offset = 0
     while True:
         try:
-            result  = tg_api("getUpdates", offset=offset, timeout=20,
-                             allowed_updates=["message", "callback_query"])
+            result = tg_api("getUpdates", offset=offset, timeout=20,
+                            allowed_updates=["message", "callback_query"])
             for upd in result.get("result", []):
                 offset = upd["update_id"] + 1
                 if "message" in upd:
