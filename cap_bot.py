@@ -17,6 +17,7 @@ NOTION_TOKEN = require_env("NOTION_TOKEN")
 NOTION_DB_ID = require_env("NOTION_DB_ID")
 TG_BOT_TOKEN = require_env("TG_BOT_TOKEN")
 
+# Маппинг тег → Notion User ID
 BUYERS = {
     "tetriss_mb": "561afa0f-0a44-4221-acda-e2f8f3e98e2e",
 }
@@ -24,8 +25,14 @@ BUYERS = {
 USERS_FILE      = "cap_bot_users.json"
 NO_TRAFFIC_DAYS = 7
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("cap_bot.log", encoding="utf-8")])
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("cap_bot.log", encoding="utf-8"),
+    ]
+)
 log = logging.getLogger(__name__)
 
 NOTION_HEADERS = {
@@ -45,6 +52,8 @@ def save_users(users):
         json.dump(users, f, indent=2, ensure_ascii=False)
 
 def parse_cap(raw):
+    if not raw:
+        return None
     raw = raw.strip().upper()
     nums = re.findall(r"\d+", raw)
     if not nums:
@@ -56,9 +65,12 @@ def parse_cap(raw):
 
 # ─── NOTION ───────────────────────────────────────────────────────────────────
 def get_streams_for_buyer(buyer_notion_id):
+    """
+    Получаем ВСЕ потоки со статусом Запущен/Не запущен/Холд,
+    фильтруем по Ответственному на стороне Python.
+    Это обходит ограничение Notion API на составные фильтры.
+    """
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-    # Фильтруем только по статусу — по Ответственному фильтруем на стороне Python
-    # Это гарантирует что Notion вернёт все записи без ограничений API
     payload = {
         "filter": {
             "or": [
@@ -70,12 +82,24 @@ def get_streams_for_buyer(buyer_notion_id):
         "page_size": 100
     }
     streams = []
+    page_num = 0
     while True:
-        r = requests.post(url, headers=NOTION_HEADERS, json=payload, timeout=15)
+        r = requests.post(url, headers=NOTION_HEADERS, json=payload, timeout=30)
         r.raise_for_status()
         data = r.json()
+        page_num += 1
+
         for page in data["results"]:
             props = page["properties"]
+
+            # Фильтр по Ответственному на стороне Python
+            resp_prop = props.get("Ответственный", {})
+            people = resp_prop.get("people", [])
+            is_mine = any(p.get("id") == buyer_notion_id for p in people)
+            if not is_mine:
+                continue
+
+            # Название потока
             ln_id = ""
             for key in ["userDefined:ID", "ID", ""]:
                 p = props.get(key, {})
@@ -84,19 +108,19 @@ def get_streams_for_buyer(buyer_notion_id):
                     break
             if not re.match(r"^LN-\d+$", ln_id):
                 continue
-            # Фильтруем по Ответственному на стороне Python
-            resp_prop = props.get("Ответственный", {})
-            people = resp_prop.get("people", [])
-            if not any(p.get("id") == buyer_notion_id for p in people):
-                continue
+
+            # Cap
             cap_raw = ""
             cap_prop = props.get("Cap", {})
             if cap_prop.get("type") == "rich_text" and cap_prop.get("rich_text"):
                 cap_raw = cap_prop["rich_text"][0]["plain_text"]
+
+            # Статус
             status = ""
             st = props.get("Баер статус", {})
             if st.get("select"):
                 status = st["select"]["name"]
+
             streams.append({
                 "notion_id":  page["id"],
                 "ln_id":      ln_id,
@@ -105,9 +129,14 @@ def get_streams_for_buyer(buyer_notion_id):
                 "status":     status,
                 "notion_url": page["url"],
             })
+
+        log.info(f"Страница {page_num}: получено {len(data['results'])} записей, моих потоков всего: {len(streams)}")
+
         if not data.get("has_more"):
             break
         payload["start_cursor"] = data["next_cursor"]
+
+    log.info(f"Итого потоков: {len(streams)}")
     return streams
 
 def set_notion_status(page_id, status):
@@ -182,15 +211,24 @@ def tg_api(method, **kwargs):
     return r.json()
 
 def tg_send(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-               "disable_web_page_preview": True}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
     if reply_markup:
         payload["reply_markup"] = reply_markup
     return tg_api("sendMessage", **payload)
 
 def tg_edit(chat_id, message_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text,
-               "parse_mode": "HTML", "disable_web_page_preview": True}
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
@@ -202,9 +240,13 @@ def answer_callback(cbq_id, text=""):
     tg_api("answerCallbackQuery", callback_query_id=cbq_id, text=text)
 
 def main_keyboard():
-    return {"keyboard": [[{"text": "🔍 Проверить капы"}],
-                         [{"text": "⚙️ Изменить настройки"}]],
-            "resize_keyboard": True}
+    return {
+        "keyboard": [
+            [{"text": "🔍 Проверить капы"}],
+            [{"text": "⚙️ Изменить настройки"}],
+        ],
+        "resize_keyboard": True,
+    }
 
 # ─── ОТЧЁТ ────────────────────────────────────────────────────────────────────
 def check_caps_for_user(buyer_notion_id, tag):
@@ -214,7 +256,6 @@ def check_caps_for_user(buyer_notion_id, tag):
 
     log.info(f"Потоков из Notion: {len(streams)}")
 
-    # Получаем все офферы и строим LN → [offer_id, ...]
     all_offers = get_all_offers()
     ln_to_offer_ids = {}
     for o in all_offers:
@@ -224,10 +265,9 @@ def check_caps_for_user(buyer_notion_id, tag):
             ln = m.group(1)
             ln_to_offer_ids.setdefault(ln, []).append(int(o["id"]))
 
-    log.info(f"LN в офферах: {len(ln_to_offer_ids)}")
-
-    # Собираем все offer_id нужных потоков
-    all_offer_ids = list({oid for s in streams for oid in ln_to_offer_ids.get(s["ln_id"], [])})
+    all_offer_ids = set(
+        oid for s in streams for oid in ln_to_offer_ids.get(s["ln_id"], [])
+    )
 
     stats_all   = get_stats_by_offer(all_offer_ids, days=90)
     stats_today = get_today_stats_by_offer(all_offer_ids)
@@ -248,8 +288,11 @@ def check_caps_for_user(buyer_notion_id, tag):
             continue
 
         if not cap_info:
-            total = sum(stats_all.get(o, {}).get("sales", 0) +
-                       stats_all.get(o, {}).get("deposits", 0) for o in offer_ids)
+            total = sum(
+                stats_all.get(o, {}).get("sales", 0) +
+                stats_all.get(o, {}).get("deposits", 0)
+                for o in offer_ids
+            )
             lines.append(f"⚪ {link} — тотал: {total} (капа не указана)")
             continue
 
@@ -257,12 +300,18 @@ def check_caps_for_user(buyer_notion_id, tag):
         cap_val  = cap_info["value"]
 
         if cap_type == "daily":
-            actual = sum(stats_today.get(o, {}).get("sales", 0) +
-                        stats_today.get(o, {}).get("deposits", 0) for o in offer_ids)
+            actual = sum(
+                stats_today.get(o, {}).get("sales", 0) +
+                stats_today.get(o, {}).get("deposits", 0)
+                for o in offer_ids
+            )
             period = "сегодня"
         else:
-            actual = sum(stats_all.get(o, {}).get("sales", 0) +
-                        stats_all.get(o, {}).get("deposits", 0) for o in offer_ids)
+            actual = sum(
+                stats_all.get(o, {}).get("sales", 0) +
+                stats_all.get(o, {}).get("deposits", 0)
+                for o in offer_ids
+            )
             period = "тотал"
 
         cost_7d   = sum(stats_7d.get(o, {}).get("cost", 0) for o in offer_ids)
@@ -271,15 +320,32 @@ def check_caps_for_user(buyer_notion_id, tag):
 
         if pct >= 1.0:
             overflow = actual - cap_val
-            lines.append(f"🔴 {link} [{cap_raw}] — <b>ПЕРЕЛИВ {overflow} FD</b> ({actual}/{cap_val} {period})")
-            actions.append({"ln_id": ln_id, "notion_id": s["notion_id"], "action": "stop"})
+            lines.append(
+                f"🔴 {link} [{cap_raw}] — <b>ПЕРЕЛИВ {overflow} FD</b> "
+                f"({actual}/{cap_val} {period})"
+            )
+            actions.append({
+                "ln_id": ln_id,
+                "notion_id": s["notion_id"],
+                "action": "stop"
+            })
         elif cost_7d == 0:
-            lines.append(f"⚠️ {link} [{cap_raw}] — не льётся {NO_TRAFFIC_DAYS} дней ({actual}/{cap_val} {period})")
-            actions.append({"ln_id": ln_id, "notion_id": s["notion_id"], "action": "hold"})
+            lines.append(
+                f"⚠️ {link} [{cap_raw}] — не льётся {NO_TRAFFIC_DAYS} дней "
+                f"({actual}/{cap_val} {period})"
+            )
+            actions.append({
+                "ln_id": ln_id,
+                "notion_id": s["notion_id"],
+                "action": "hold"
+            })
         elif remaining <= 0:
             lines.append(f"🟡 {link} [{cap_raw}] — закрыта ({actual}/{cap_val} {period})")
         else:
-            lines.append(f"✅ {link} [{cap_raw}] — ещё <b>{remaining} FD</b> ({actual}/{cap_val} {period})")
+            lines.append(
+                f"✅ {link} [{cap_raw}] — ещё <b>{remaining} FD</b> "
+                f"({actual}/{cap_val} {period})"
+            )
 
     return "\n".join(lines), actions
 
@@ -287,11 +353,15 @@ def build_keyboard(actions):
     buttons = []
     for a in actions:
         if a["action"] == "stop":
-            buttons.append([{"text": f"⛔ Стоп {a['ln_id']}",
-                             "callback_data": f"stop:{a['notion_id']}:{a['ln_id']}"}])
+            buttons.append([{
+                "text": f"⛔ Стоп {a['ln_id']}",
+                "callback_data": f"stop:{a['notion_id']}:{a['ln_id']}"
+            }])
         elif a["action"] == "hold":
-            buttons.append([{"text": f"❄️ Холд {a['ln_id']}",
-                             "callback_data": f"hold:{a['notion_id']}:{a['ln_id']}"}])
+            buttons.append([{
+                "text": f"❄️ Холд {a['ln_id']}",
+                "callback_data": f"hold:{a['notion_id']}:{a['ln_id']}"
+            }])
     return {"inline_keyboard": buttons} if buttons else None
 
 # ─── ХЭНДЛЕРЫ ─────────────────────────────────────────────────────────────────
@@ -306,8 +376,12 @@ def handle_message(msg, users, states):
     if text == "/start":
         user = users.get(chat_id)
         if user:
-            tg_send(chat_id, f"👋 С возвращением, <b>{user['tag']}</b>!\n\nНажми кнопку чтобы проверить капы.",
-                    reply_markup=main_keyboard())
+            tg_send(
+                chat_id,
+                f"👋 С возвращением, <b>{user['tag']}</b>!\n\n"
+                f"Нажми кнопку чтобы проверить капы.",
+                reply_markup=main_keyboard()
+            )
         else:
             states[chat_id] = STATE_ASK_TAG
             tg_send(chat_id, "👋 Привет! Введи свой тег (например: <code>tetriss_mb</code>):")
@@ -318,79 +392,16 @@ def handle_message(msg, users, states):
         tg_send(chat_id, "Введи свой тег:")
         return
 
-    if text == "/debugln":
-        user = users.get(chat_id)
-        if not user:
-            tg_send(chat_id, "Сначала введи тег через /start")
-            return
-        tg_send(chat_id, "⏳ Проверяю матчинг LN...")
-        try:
-            streams = get_streams_for_buyer(user["notion_id"])
-            all_offers = get_all_offers()
-            ln_to_offer_ids = {}
-            for o in all_offers:
-                name = o.get("name", "")
-                m = re.match(r"^(LN-\d+)", name)
-                if m:
-                    ln = m.group(1)
-                    ln_to_offer_ids.setdefault(ln, []).append(int(o["id"]))
-            found = [s["ln_id"] for s in streams if s["ln_id"] in ln_to_offer_ids]
-            not_found = [s["ln_id"] for s in streams if s["ln_id"] not in ln_to_offer_ids]
-            msg = f"Потоков в Notion: {len(streams)}
-Найдено в Keitaro: {len(found)}
-Не найдено: {len(not_found)}"
-            if not_found:
-                msg += "
-
-Нет в Keitaro:
-" + "
-".join(f"• {ln}" for ln in not_found[:20])
-            tg_send(chat_id, msg)
-        except Exception as e:
-            tg_send(chat_id, f"❌ {e}")
-        return
-
-    if text == "/count":
-        tg_send(chat_id, "⏳ Считаю потоки в Notion...")
-        user = users.get(chat_id)
-        if not user:
-            tg_send(chat_id, "Сначала введи тег через /start")
-            return
-        try:
-            url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-            payload = {
-                "filter": {
-                    "and": [
-                        {"or": [
-                            {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                            {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                            {"property": "Баер статус", "select": {"equals": "Холд"}},
-                        ]},
-                        {"property": "Ответственный", "people": {"contains": user["notion_id"]}}
-                    ]
-                }
-            }
-            total = 0
-            while True:
-                r = requests.post(url, headers=NOTION_HEADERS, json=payload, timeout=15)
-                r.raise_for_status()
-                data = r.json()
-                total += len(data["results"])
-                if not data.get("has_more"):
-                    break
-                payload["start_cursor"] = data["next_cursor"]
-            tg_send(chat_id, f"📊 Всего потоков (Запущен/Не запущен/Холд): {total}")
-        except Exception as e:
-            tg_send(chat_id, f"❌ {e}")
-        return
-
     if text == "/debug":
         tg_send(chat_id, "⏳ Получаю офферы из Keitaro...")
         try:
             offers = get_all_offers()
             names  = [o.get("name", "") for o in offers[:10]]
-            tg_send(chat_id, f"Всего офферов: {len(offers)}\n\nПервые 10:\n" +
-                    "\n".join(f"• {n}" for n in names))
+            tg_send(
+                chat_id,
+                f"Всего офферов: {len(offers)}\n\nПервые 10:\n" +
+                "\n".join(f"• {n}" for n in names)
+            )
         except Exception as e:
             tg_send(chat_id, f"❌ {e}")
         return
@@ -419,7 +430,11 @@ def handle_message(msg, users, states):
         users[chat_id] = {"tag": tag, "notion_id": BUYERS[tag]}
         states[chat_id] = STATE_IDLE
         save_users(users)
-        tg_send(chat_id, f"✅ Готово! Тег: <b>{tag}</b>", reply_markup=main_keyboard())
+        tg_send(
+            chat_id,
+            f"✅ Готово! Тег: <b>{tag}</b>",
+            reply_markup=main_keyboard()
+        )
         return
 
     tg_send(chat_id, "Используй кнопки 👇", reply_markup=main_keyboard())
@@ -439,17 +454,24 @@ def handle_callback(cb, users):
         try:
             set_notion_status(notion_id, status_map[action])
             answer_callback(cbq_id, f"{emoji_map[action]} {ln_id} → {status_map[action]}")
-            orig = cb["message"].get("text", "")
+            orig     = cb["message"].get("text", "")
             existing = cb["message"].get("reply_markup", {}).get("inline_keyboard", [])
-            new_btns = [row for row in existing
-                       if not any(btn.get("callback_data", "").startswith(f"{action}:{notion_id}")
-                                  for btn in row)]
-            tg_edit(chat_id, msg_id,
-                    orig + f"\n\n✅ <b>{ln_id}</b> → <b>{status_map[action]}</b>",
-                    reply_markup={"inline_keyboard": new_btns} if new_btns else None)
+            new_btns = [
+                row for row in existing
+                if not any(
+                    btn.get("callback_data", "").startswith(f"{action}:{notion_id}")
+                    for btn in row
+                )
+            ]
+            tg_edit(
+                chat_id, msg_id,
+                orig + f"\n\n✅ <b>{ln_id}</b> → <b>{status_map[action]}</b>",
+                reply_markup={"inline_keyboard": new_btns} if new_btns else None
+            )
         except Exception as e:
             answer_callback(cbq_id, f"Ошибка: {e}")
 
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main():
     log.info("🤖 Cap Bot запущен")
     users  = load_users()
@@ -457,8 +479,12 @@ def main():
     offset = 0
     while True:
         try:
-            result = tg_api("getUpdates", offset=offset, timeout=20,
-                            allowed_updates=["message", "callback_query"])
+            result = tg_api(
+                "getUpdates",
+                offset=offset,
+                timeout=20,
+                allowed_updates=["message", "callback_query"]
+            )
             for upd in result.get("result", []):
                 offset = upd["update_id"] + 1
                 if "message" in upd:
