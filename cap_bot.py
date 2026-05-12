@@ -121,18 +121,14 @@ def set_notion_status(page_id, status):
     r.raise_for_status()
 
 # ─── KEITARO ──────────────────────────────────────────────────────────────────
-def get_offers_by_group(group_name):
-    """Получить офферы из Keitaro по группе."""
+def get_all_offers():
+    """Получить все офферы из Keitaro."""
     headers = {"Api-Key": KEITARO_KEY}
     r = requests.get(f"{KEITARO_URL}/admin_api/v1/offers", headers=headers, timeout=15)
     r.raise_for_status()
-    all_offers = r.json()
-
-    # Фильтруем по группе — ищем group_name в названии оффера
-    # Формат: "LN-XXXXX; KR; Brand; T20; ; affilate1@044.agency;"
-    filtered = [o for o in all_offers if group_name.lower() in o.get("name", "").lower()]
-    log.info(f"Офферов для группы '{group_name}': {len(filtered)} из {len(all_offers)}")
-    return filtered
+    offers = r.json()
+    log.info(f"Keitaro: {len(offers)} офферов")
+    return offers
 
 def get_stats_by_offer(offer_ids, days=90):
     if not offer_ids:
@@ -214,14 +210,13 @@ def main_keyboard():
             "resize_keyboard": True}
 
 # ─── ОТЧЁТ ────────────────────────────────────────────────────────────────────
-def check_caps_for_user(keitaro_group):
+def check_caps_for_user(tag):
+    keitaro_group = tag
     # 1. Все потоки из Notion
     all_streams = get_all_streams()
 
-    # 2. Офферы из Keitaro по группе байера
-    group_offers = get_offers_by_group(keitaro_group)
-    if not group_offers:
-        return f"❌ Офферы для группы '{keitaro_group}' не найдены в Keitaro", []
+    # 2. Все офферы из Keitaro
+    group_offers = get_all_offers()
 
     # 3. Матчим LN-XXXXX из офферов
     ln_to_offer_ids = {}
