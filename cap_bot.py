@@ -87,10 +87,12 @@ def get_streams_for_buyer(buyer_notion_id):
         for page in data["results"]:
             props = page["properties"]
 
-            # Фильтр по Ответственному — через массив people
+            # Фильтр по Ответственному — через people array ИЛИ mention-user строку
             resp_prop = props.get("Ответственный", {})
             people = resp_prop.get("people", [])
-            if not any(p.get("id") == buyer_notion_id for p in people):
+            via_people = any(p.get("id") == buyer_notion_id for p in people)
+            via_mention = buyer_notion_id in str(resp_prop)
+            if not via_people and not via_mention:
                 continue
 
             # LN ID
