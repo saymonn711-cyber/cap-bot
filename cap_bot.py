@@ -92,20 +92,10 @@ def get_streams_for_buyer(buyer_notion_id):
         for page in data["results"]:
             props = page["properties"]
 
-            # Фильтр по Ответственному на стороне Python
-            # Notion API возвращает поле как строку с mention-user или как массив people
+            # Фильтр по Ответственному — ищем buyer_notion_id в любом представлении поля
             resp_prop = props.get("Ответственный", {})
-            is_mine = False
-            # Вариант 1: массив people объектов
-            people = resp_prop.get("people", [])
-            if any(p.get("id") == buyer_notion_id for p in people):
-                is_mine = True
-            # Вариант 2: строка с mention-user url="user://UUID"
-            if not is_mine:
-                raw = str(resp_prop)
-                if buyer_notion_id in raw:
-                    is_mine = True
-            if not is_mine:
+            # Конвертируем всё поле в строку и ищем UUID байера
+            if buyer_notion_id not in str(resp_prop):
                 continue
 
             # Название потока
