@@ -63,25 +63,28 @@ BUYER_UUIDS = {
     ],
 }
 
+ACTIVE_STATUSES = {"Запущен", "Не запущен", "Холд"}
+
 def get_all_streams():
+    """Берём ВСЕ записи базы без фильтра по статусу.
+    Фильтруем статус на стороне Python — это обходит ограничение Notion API
+    которое возвращает только часть записей при использовании фильтров."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-    payload = {
-        "filter": {
-            "or": [
-                {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                {"property": "Баер статус", "select": {"equals": "Холд"}},
-            ]
-        },
-        "page_size": 100
-    }
+    payload = {"page_size": 100}
     streams = []
+    page_num = 0
     while True:
         r = requests.post(url, headers=NOTION_HEADERS, json=payload, timeout=30)
         r.raise_for_status()
         data = r.json()
+        page_num += 1
         for page in data["results"]:
             props = page["properties"]
+            # Фильтр статуса на стороне Python
+            st = props.get("Баер статус", {})
+            status = st.get("select", {}).get("name", "") if st.get("select") else ""
+            if status not in ACTIVE_STATUSES:
+                continue
             ln_id = ""
             for key in ["userDefined:ID", "ID", ""]:
                 p = props.get(key, {})
@@ -94,10 +97,6 @@ def get_all_streams():
             cap_prop = props.get("Cap", {})
             if cap_prop.get("type") == "rich_text" and cap_prop.get("rich_text"):
                 cap_raw = cap_prop["rich_text"][0]["plain_text"]
-            status = ""
-            st = props.get("Баер статус", {})
-            if st.get("select"):
-                status = st["select"]["name"]
             streams.append({
                 "notion_id":  page["id"],
                 "ln_id":      ln_id,
@@ -106,10 +105,11 @@ def get_all_streams():
                 "status":     status,
                 "notion_url": page["url"],
             })
+        log.info(f"Страница {page_num}: активных потоков: {len(streams)}, has_more: {data.get('has_more')}")
         if not data.get("has_more"):
             break
         payload["start_cursor"] = data["next_cursor"]
-    log.info(f"Потоков из Notion: {len(streams)}")
+    log.info(f"Всего активных потоков: {len(streams)}")
     return streams
 
 def set_notion_status(page_id, status):
