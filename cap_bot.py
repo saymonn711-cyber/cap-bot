@@ -55,6 +55,14 @@ def parse_cap(raw):
         return {"type": "daily", "value": val}
     return {"type": "total", "value": val}
 
+# Маппінг тег -> всі відомі UUID (старий і новий)
+BUYER_UUIDS = {
+    "tetriss_mb_frz": [
+        "561afa0f-0a44-4221-acda-e2f8f3e98e2e",  # новий UUID
+        "fffd872b-594c-8165-b4b2-0002aded9183",  # старий UUID
+    ],
+}
+
 def get_all_streams():
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     payload = {
@@ -113,18 +121,14 @@ def set_notion_status(page_id, status):
 
 def get_offers_by_group(group_name):
     headers = {"Api-Key": KEITARO_KEY}
-    r = requests.get(f"{KEITARO_URL}/admin_api/v1/offers", headers=headers, timeout=15)
+    # Запрашиваем с большим лимитом чтобы получить все офферы
+    r = requests.get(f"{KEITARO_URL}/admin_api/v1/offers",
+                    headers=headers, params={"limit": 10000}, timeout=30)
     r.raise_for_status()
     all_offers = r.json()
-    # Ищем group_name в любом поле группы оффера
     filtered = [o for o in all_offers
                 if str(o.get("group", "")).lower() == group_name.lower()]
     log.info(f"Офферов для группы '{group_name}': {len(filtered)} из {len(all_offers)}")
-    if not filtered:
-        # Логируем поля первого оффера для отладки
-        if all_offers:
-            log.warning(f"Поля оффера: {list(all_offers[0].keys())}")
-            log.warning(f"Первый оффер: {all_offers[0]}")
     return filtered
 
 def get_stats_by_offer(offer_ids, days=90):
@@ -301,6 +305,64 @@ def handle_message(msg, users, states):
     if text == "⚙️ Изменить настройки":
         states[chat_id] = STATE_ASK_TAG
         tg_send(chat_id, "Введи название группы офферов в Keitaro:")
+        return
+
+    if text.startswith("/debugln "):
+        ln = text.split(" ", 1)[1].strip().upper()
+        tg_send(chat_id, f"⏳ Проверяю {ln}...")
+        try:
+            results = []
+            # 1. Проверяем Notion
+            url_n = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
+            payload_n = {
+                "filter": {"or": [
+                    {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                    {"property": "Баер статус", "select": {"equals": "Не запущен"}},
+                    {"property": "Баер статус", "select": {"equals": "Холд"}},
+                ]},
+                "page_size": 100
+            }
+            found_notion = False
+            while True:
+                r_n = requests.post(url_n, headers=NOTION_HEADERS, json=payload_n, timeout=30)
+                r_n.raise_for_status()
+                d_n = r_n.json()
+                for page in d_n["results"]:
+                    props = page["properties"]
+                    ln_id = ""
+                    for key in ["userDefined:ID", "ID", ""]:
+                        p = props.get(key, {})
+                        if p.get("type") == "title" and p.get("title"):
+                            ln_id = p["title"][0]["plain_text"].strip()
+                            break
+                    if ln_id == ln:
+                        st = props.get("Баер статус", {})
+                        status = st.get("select", {}).get("name", "?") if st.get("select") else "?"
+                        results.append(f"✅ Notion: найден, статус={status}")
+                        found_notion = True
+                        break
+                if found_notion or not d_n.get("has_more"):
+                    break
+                payload_n["start_cursor"] = d_n["next_cursor"]
+            if not found_notion:
+                results.append(f"❌ Notion: НЕ найден среди активных потоков")
+            # 2. Проверяем Keitaro
+            user = users.get(chat_id)
+            group = user["group"] if user else "tetriss_mb_frz"
+            headers_k = {"Api-Key": KEITARO_KEY}
+            r_k = requests.get(f"{KEITARO_URL}/admin_api/v1/offers",
+                              headers=headers_k, params={"limit": 10000}, timeout=30)
+            r_k.raise_for_status()
+            all_offers = r_k.json()
+            found_k = [o for o in all_offers if o.get("name", "").startswith(ln)]
+            if found_k:
+                for o in found_k:
+                    results.append(f"✅ Keitaro: найден, group={o.get('group','?')}, name={o['name'][:50]}")
+            else:
+                results.append(f"❌ Keitaro: НЕ найден среди {len(all_offers)} офферов")
+            tg_send(chat_id, "\n".join(results))
+        except Exception as e:
+            tg_send(chat_id, f"❌ {e}")
         return
 
     if text == "/debugoffers":
