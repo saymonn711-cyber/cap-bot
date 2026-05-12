@@ -366,15 +366,27 @@ def handle_message(msg, users, states):
         return
 
     if text == "/debugraw":
-        tg_send(chat_id, "⏳ Смотрю Ответственный для LN-9352...")
+        tg_send(chat_id, "⏳ Ищу LN-9352 в database query...")
         try:
-            url3 = "https://api.notion.com/v1/pages/2cdfc55e-9923-807d-9933-f8c21dbe5856"
-            r3 = requests.get(url3, headers=NOTION_HEADERS, timeout=15)
+            url3 = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
+            payload3 = {
+                "filter": {
+                    "and": [
+                        {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                        {"property": "userDefined:ID", "title": {"equals": "LN-9352"}}
+                    ]
+                },
+                "page_size": 1
+            }
+            r3 = requests.post(url3, headers=NOTION_HEADERS, json=payload3, timeout=15)
             r3.raise_for_status()
             d3 = r3.json()
-            props3 = d3.get("properties", {})
-            resp3 = str(props3.get("Ответственный", {}))[:500]
-            tg_send(chat_id, f"LN-9352 Ответственный:\n{resp3}")
+            if d3["results"]:
+                props3 = d3["results"][0]["properties"]
+                resp3 = str(props3.get("Ответственный", {}))[:500]
+                tg_send(chat_id, f"LN-9352 Ответственный через DB query:\n{resp3}")
+            else:
+                tg_send(chat_id, "LN-9352 не найден через DB query!")
         except Exception as e:
             tg_send(chat_id, f"Ошибка: {e}")
         return
