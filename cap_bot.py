@@ -70,7 +70,7 @@ def get_all_streams():
     Фильтруем статус на стороне Python — это обходит ограничение Notion API
     которое возвращает только часть записей при использовании фильтров."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-    payload = {"page_size": 100}
+    payload = {"page_size": 100, "sorts": [{"timestamp": "created_time", "direction": "ascending"}]}
     streams = []
     page_num = 0
     while True:
