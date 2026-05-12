@@ -21,6 +21,11 @@ BUYERS = {
     "tetriss_mb": "561afa0f-0a44-4221-acda-e2f8f3e98e2e",
 }
 
+# Дополнительные UUID одного и того же байера (старый и новый аккаунты)
+BUYER_EXTRA_IDS = {
+    "tetriss_mb": ["fffd872b-594c-8165-b4b2-0002aded9183"],
+}
+
 USERS_FILE      = "cap_bot_users.json"
 NO_TRAFFIC_DAYS = 7
 
@@ -87,12 +92,18 @@ def get_streams_for_buyer(buyer_notion_id):
         for page in data["results"]:
             props = page["properties"]
 
-            # Фильтр по Ответственному — через people array ИЛИ mention-user строку
+            # Фильтр по Ответственному — проверяем все известные UUID байера
             resp_prop = props.get("Ответственный", {})
             people = resp_prop.get("people", [])
-            via_people = any(p.get("id") == buyer_notion_id for p in people)
-            via_mention = buyer_notion_id in str(resp_prop)
-            if not via_people and not via_mention:
+            people_ids = [p.get("id") for p in people]
+            resp_raw = str(resp_prop)
+            
+            all_ids = [buyer_notion_id] + BUYER_EXTRA_IDS.get(
+                next((k for k, v in BUYERS.items() if v == buyer_notion_id), ""), []
+            )
+            
+            is_mine = any(uid in people_ids or uid in resp_raw for uid in all_ids)
+            if not is_mine:
                 continue
 
             # LN ID
