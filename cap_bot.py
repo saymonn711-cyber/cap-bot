@@ -366,27 +366,30 @@ def handle_message(msg, users, states):
         return
 
     if text == "/debugraw":
-        tg_send(chat_id, "⏳ Ищу LN-9352 в database query...")
+        tg_send(chat_id, "⏳ Смотрю первые 5 потоков и их UUID...")
         try:
             url3 = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
             payload3 = {
-                "filter": {
-                    "and": [
-                        {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                        {"property": "userDefined:ID", "title": {"equals": "LN-9352"}}
-                    ]
-                },
-                "page_size": 1
+                "filter": {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                "page_size": 5
             }
             r3 = requests.post(url3, headers=NOTION_HEADERS, json=payload3, timeout=15)
             r3.raise_for_status()
             d3 = r3.json()
-            if d3["results"]:
-                props3 = d3["results"][0]["properties"]
-                resp3 = str(props3.get("Ответственный", {}))[:500]
-                tg_send(chat_id, f"LN-9352 Ответственный через DB query:\n{resp3}")
-            else:
-                tg_send(chat_id, "LN-9352 не найден через DB query!")
+            msg_parts = []
+            for pg in d3["results"]:
+                props3 = pg["properties"]
+                ln3 = ""
+                for key in ["userDefined:ID", "ID", ""]:
+                    p3 = props3.get(key, {})
+                    if p3.get("type") == "title" and p3.get("title"):
+                        ln3 = p3["title"][0]["plain_text"]
+                        break
+                resp3 = props3.get("Ответственный", {})
+                people3 = resp3.get("people", [])
+                uuids = [p.get("id","?") for p in people3]
+                msg_parts.append(f"{ln3}: {uuids}")
+            tg_send(chat_id, "\n".join(msg_parts))
         except Exception as e:
             tg_send(chat_id, f"Ошибка: {e}")
         return
