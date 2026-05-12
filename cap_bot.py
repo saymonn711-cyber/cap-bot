@@ -385,36 +385,39 @@ def handle_message(msg, users, states):
         return
 
     if text == "/debugraw":
-        tg_send(chat_id, "⏳ Ищу твои потоки через people contains и смотрю полный raw ответ...")
+        tg_send(chat_id, "⏳ Сравниваю LN-13346 (видит) и LN-13530 (не видит)...")
         try:
-            user = users.get(chat_id)
-            uid = user["notion_id"] if user else "561afa0f-0a44-4221-acda-e2f8f3e98e2e"
             url3 = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-            # Запрашиваем с people contains
-            payload3 = {
-                "filter": {
-                    "and": [
-                        {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                        {"property": "Ответственный", "people": {"contains": uid}}
-                    ]
-                },
-                "page_size": 3
-            }
-            r3 = requests.post(url3, headers=NOTION_HEADERS, json=payload3, timeout=15)
-            r3.raise_for_status()
-            d3 = r3.json()
-            msg_parts = [f"Через people contains: {len(d3['results'])} результатов"]
-            for pg in d3["results"]:
-                props3 = pg["properties"]
-                ln3 = ""
-                for key in ["userDefined:ID", "ID", ""]:
-                    p3 = props3.get(key, {})
-                    if p3.get("type") == "title" and p3.get("title"):
-                        ln3 = p3["title"][0]["plain_text"]
+            msg_parts = []
+            for ln_check in ["LN-13346", "LN-13530"]:
+                payload3 = {
+                    "filter": {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                    "page_size": 100
+                }
+                found = None
+                while True:
+                    r3 = requests.post(url3, headers=NOTION_HEADERS, json=payload3, timeout=30)
+                    r3.raise_for_status()
+                    d3 = r3.json()
+                    for pg in d3["results"]:
+                        props3 = pg["properties"]
+                        ln3 = ""
+                        for key in ["userDefined:ID", "ID", ""]:
+                            p3 = props3.get(key, {})
+                            if p3.get("type") == "title" and p3.get("title"):
+                                ln3 = p3["title"][0]["plain_text"]
+                                break
+                        if ln3 == ln_check:
+                            found = props3
+                            break
+                    if found or not d3.get("has_more"):
                         break
-                # Полный raw ответ поля
-                resp3 = str(props3.get("Ответственный", {}))
-                msg_parts.append(f"{ln3}:\n{resp3[:300]}")
+                    payload3["start_cursor"] = d3["next_cursor"]
+                if found:
+                    resp3 = str(found.get("Ответственный", {}))[:300]
+                    msg_parts.append(f"{ln_check}:\n{resp3}")
+                else:
+                    msg_parts.append(f"{ln_check}: НЕ НАЙДЕН в DB query")
             tg_send(chat_id, "\n\n".join(msg_parts))
         except Exception as e:
             tg_send(chat_id, f"Ошибка: {e}")
