@@ -57,17 +57,17 @@ def parse_cap(raw):
 # ─── NOTION ───────────────────────────────────────────────────────────────────
 def get_streams_for_buyer(buyer_notion_id):
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
+    # Фильтруем только по статусу — по Ответственному фильтруем на стороне Python
+    # Это гарантирует что Notion вернёт все записи без ограничений API
     payload = {
         "filter": {
-            "and": [
-                {"or": [
-                    {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                    {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                    {"property": "Баер статус", "select": {"equals": "Холд"}},
-                ]},
-                {"property": "Ответственный", "people": {"contains": buyer_notion_id}}
+            "or": [
+                {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                {"property": "Баер статус", "select": {"equals": "Не запущен"}},
+                {"property": "Баер статус", "select": {"equals": "Холд"}},
             ]
-        }
+        },
+        "page_size": 100
     }
     streams = []
     while True:
@@ -83,6 +83,11 @@ def get_streams_for_buyer(buyer_notion_id):
                     ln_id = p["title"][0]["plain_text"].strip()
                     break
             if not re.match(r"^LN-\d+$", ln_id):
+                continue
+            # Фильтруем по Ответственному на стороне Python
+            resp_prop = props.get("Ответственный", {})
+            people = resp_prop.get("people", [])
+            if not any(p.get("id") == buyer_notion_id for p in people):
                 continue
             cap_raw = ""
             cap_prop = props.get("Cap", {})
@@ -311,6 +316,38 @@ def handle_message(msg, users, states):
     if text == "⚙️ Изменить настройки":
         states[chat_id] = STATE_ASK_TAG
         tg_send(chat_id, "Введи свой тег:")
+        return
+
+    if text == "/debugln":
+        user = users.get(chat_id)
+        if not user:
+            tg_send(chat_id, "Сначала введи тег через /start")
+            return
+        tg_send(chat_id, "⏳ Проверяю матчинг LN...")
+        try:
+            streams = get_streams_for_buyer(user["notion_id"])
+            all_offers = get_all_offers()
+            ln_to_offer_ids = {}
+            for o in all_offers:
+                name = o.get("name", "")
+                m = re.match(r"^(LN-\d+)", name)
+                if m:
+                    ln = m.group(1)
+                    ln_to_offer_ids.setdefault(ln, []).append(int(o["id"]))
+            found = [s["ln_id"] for s in streams if s["ln_id"] in ln_to_offer_ids]
+            not_found = [s["ln_id"] for s in streams if s["ln_id"] not in ln_to_offer_ids]
+            msg = f"Потоков в Notion: {len(streams)}
+Найдено в Keitaro: {len(found)}
+Не найдено: {len(not_found)}"
+            if not_found:
+                msg += "
+
+Нет в Keitaro:
+" + "
+".join(f"• {ln}" for ln in not_found[:20])
+            tg_send(chat_id, msg)
+        except Exception as e:
+            tg_send(chat_id, f"❌ {e}")
         return
 
     if text == "/count":
