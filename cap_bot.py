@@ -63,10 +63,13 @@ def get_streams_for_buyer(buyer_notion_id):
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     payload = {
         "filter": {
-            "or": [
-                {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                {"property": "Баер статус", "select": {"equals": "Холд"}},
+            "and": [
+                {"or": [
+                    {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                    {"property": "Баер статус", "select": {"equals": "Не запущен"}},
+                    {"property": "Баер статус", "select": {"equals": "Холд"}},
+                ]},
+                {"property": "Ответственный", "people": {"contains": buyer_notion_id}}
             ]
         },
         "page_size": 100
@@ -84,9 +87,10 @@ def get_streams_for_buyer(buyer_notion_id):
         for page in data["results"]:
             props = page["properties"]
 
-            # Фильтр по Ответственному — ищем UUID в сыром тексте
-            resp_raw = str(props.get("Ответственный", {}))
-            if buyer_notion_id not in resp_raw:
+            # Фильтр по Ответственному — через массив people
+            resp_prop = props.get("Ответственный", {})
+            people = resp_prop.get("people", [])
+            if not any(p.get("id") == buyer_notion_id for p in people):
                 continue
 
             # LN ID
@@ -362,28 +366,15 @@ def handle_message(msg, users, states):
         return
 
     if text == "/debugraw":
-        tg_send(chat_id, "⏳ Смотрю сырой ответ API...")
+        tg_send(chat_id, "⏳ Смотрю Ответственный для LN-9352...")
         try:
-            url3 = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-            payload3 = {
-                "filter": {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                "page_size": 3
-            }
-            r3 = requests.post(url3, headers=NOTION_HEADERS, json=payload3, timeout=15)
+            url3 = "https://api.notion.com/v1/pages/2cdfc55e-9923-807d-9933-f8c21dbe5856"
+            r3 = requests.get(url3, headers=NOTION_HEADERS, timeout=15)
             r3.raise_for_status()
             d3 = r3.json()
-            msg_parts = []
-            for pg in d3["results"]:
-                props3 = pg["properties"]
-                ln3 = ""
-                for key in ["userDefined:ID", "ID", ""]:
-                    p3 = props3.get(key, {})
-                    if p3.get("type") == "title" and p3.get("title"):
-                        ln3 = p3["title"][0]["plain_text"]
-                        break
-                resp3 = str(props3.get("Ответственный", {}))[:200]
-                msg_parts.append(f"<b>{ln3}</b>\n{resp3}")
-            tg_send(chat_id, "\n\n".join(msg_parts))
+            props3 = d3.get("properties", {})
+            resp3 = str(props3.get("Ответственный", {}))[:500]
+            tg_send(chat_id, f"LN-9352 Ответственный:\n{resp3}")
         except Exception as e:
             tg_send(chat_id, f"Ошибка: {e}")
         return
