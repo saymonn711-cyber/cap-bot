@@ -313,6 +313,40 @@ def handle_message(msg, users, states):
         tg_send(chat_id, "Введи свой тег:")
         return
 
+    if text == "/count":
+        tg_send(chat_id, "⏳ Считаю потоки в Notion...")
+        user = users.get(chat_id)
+        if not user:
+            tg_send(chat_id, "Сначала введи тег через /start")
+            return
+        try:
+            url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
+            payload = {
+                "filter": {
+                    "and": [
+                        {"or": [
+                            {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                            {"property": "Баер статус", "select": {"equals": "Не запущен"}},
+                            {"property": "Баер статус", "select": {"equals": "Холд"}},
+                        ]},
+                        {"property": "Ответственный", "people": {"contains": user["notion_id"]}}
+                    ]
+                }
+            }
+            total = 0
+            while True:
+                r = requests.post(url, headers=NOTION_HEADERS, json=payload, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                total += len(data["results"])
+                if not data.get("has_more"):
+                    break
+                payload["start_cursor"] = data["next_cursor"]
+            tg_send(chat_id, f"📊 Всего потоков (Запущен/Не запущен/Холд): {total}")
+        except Exception as e:
+            tg_send(chat_id, f"❌ {e}")
+        return
+
     if text == "/debug":
         tg_send(chat_id, "⏳ Получаю офферы из Keitaro...")
         try:
