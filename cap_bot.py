@@ -337,6 +337,7 @@ def handle_message(msg, users, states):
             return
         tg_send(chat_id, "⏳ Считаю...")
         try:
+            uid = user["notion_id"]
             url2 = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
             payload2 = {
                 "filter": {"or": [
@@ -347,20 +348,36 @@ def handle_message(msg, users, states):
                 "page_size": 100
             }
             total_all = 0
-            total_mine = 0
+            via_people = 0
+            via_raw = 0
+            sample_other_ids = set()
             while True:
                 r2 = requests.post(url2, headers=NOTION_HEADERS, json=payload2, timeout=30)
                 r2.raise_for_status()
                 d2 = r2.json()
                 for pg in d2["results"]:
                     total_all += 1
-                    raw = str(pg["properties"].get("Ответственный", {}))
-                    if user["notion_id"] in raw:
-                        total_mine += 1
+                    resp = pg["properties"].get("Ответственный", {})
+                    people = resp.get("people", [])
+                    ids_in_people = [p.get("id") for p in people]
+                    if uid in ids_in_people:
+                        via_people += 1
+                    elif uid in str(resp):
+                        via_raw += 1
+                    else:
+                        for pid in ids_in_people:
+                            if pid:
+                                sample_other_ids.add(pid)
                 if not d2.get("has_more"):
                     break
                 payload2["start_cursor"] = d2["next_cursor"]
-            tg_send(chat_id, f"Всего активных потоков в базе: {total_all}\nТвоих (по UUID в поле): {total_mine}")
+            sample = list(sample_other_ids)[:3]
+            tg_send(chat_id,
+                f"Всего активных: {total_all}\n"
+                f"Твоих через people[id]: {via_people}\n"
+                f"Твоих через raw текст: {via_raw}\n"
+                f"Примеры чужих UUID: {sample}"
+            )
         except Exception as e:
             tg_send(chat_id, f"Ошибка: {e}")
         return
