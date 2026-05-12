@@ -17,15 +17,6 @@ NOTION_TOKEN = require_env("NOTION_TOKEN")
 NOTION_DB_ID = require_env("NOTION_DB_ID")
 TG_BOT_TOKEN = require_env("TG_BOT_TOKEN")
 
-BUYERS = {
-    "tetriss_mb": "561afa0f-0a44-4221-acda-e2f8f3e98e2e",
-}
-
-# Дополнительные UUID одного и того же байера (старый и новый аккаунты)
-BUYER_EXTRA_IDS = {
-    "tetriss_mb": ["fffd872b-594c-8165-b4b2-0002aded9183"],
-}
-
 USERS_FILE      = "cap_bot_users.json"
 NO_TRAFFIC_DAYS = 7
 
@@ -64,49 +55,29 @@ def parse_cap(raw):
         return {"type": "daily", "value": val}
     return {"type": "total", "value": val}
 
-def get_streams_for_buyer(buyer_notion_id):
+# ─── NOTION ───────────────────────────────────────────────────────────────────
+def get_all_streams():
+    """Берём ВСЕ потоки с нужными статусами без фильтра по байеру."""
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     payload = {
         "filter": {
-            "and": [
-                {"or": [
-                    {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                    {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                    {"property": "Баер статус", "select": {"equals": "Холд"}},
-                ]},
-                {"property": "Ответственный", "people": {"contains": buyer_notion_id}}
+            "or": [
+                {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                {"property": "Баер статус", "select": {"equals": "Не запущен"}},
+                {"property": "Баер статус", "select": {"equals": "Холд"}},
             ]
         },
         "page_size": 100
     }
     streams = []
-    page_num = 0
-    total_pages = 0
     while True:
         r = requests.post(url, headers=NOTION_HEADERS, json=payload, timeout=30)
         r.raise_for_status()
         data = r.json()
-        page_num += 1
-        total_pages += len(data["results"])
 
         for page in data["results"]:
             props = page["properties"]
 
-            # Фильтр по Ответственному — проверяем все известные UUID байера
-            resp_prop = props.get("Ответственный", {})
-            people = resp_prop.get("people", [])
-            people_ids = [p.get("id") for p in people]
-            resp_raw = str(resp_prop)
-            
-            all_ids = [buyer_notion_id] + BUYER_EXTRA_IDS.get(
-                next((k for k, v in BUYERS.items() if v == buyer_notion_id), ""), []
-            )
-            
-            is_mine = any(uid in people_ids or uid in resp_raw for uid in all_ids)
-            if not is_mine:
-                continue
-
-            # LN ID
             ln_id = ""
             for key in ["userDefined:ID", "ID", ""]:
                 p = props.get(key, {})
@@ -116,13 +87,11 @@ def get_streams_for_buyer(buyer_notion_id):
             if not re.match(r"^LN-\d+$", ln_id):
                 continue
 
-            # Cap
             cap_raw = ""
             cap_prop = props.get("Cap", {})
             if cap_prop.get("type") == "rich_text" and cap_prop.get("rich_text"):
                 cap_raw = cap_prop["rich_text"][0]["plain_text"]
 
-            # Статус
             status = ""
             st = props.get("Баер статус", {})
             if st.get("select"):
@@ -137,13 +106,11 @@ def get_streams_for_buyer(buyer_notion_id):
                 "notion_url": page["url"],
             })
 
-        log.info(f"Страница {page_num}: всего записей {total_pages}, моих: {len(streams)}, has_more: {data.get('has_more')}")
-
         if not data.get("has_more"):
             break
         payload["start_cursor"] = data["next_cursor"]
 
-    log.info(f"Итого моих потоков: {len(streams)}")
+    log.info(f"Всего потоков из Notion: {len(streams)}")
     return streams
 
 def set_notion_status(page_id, status):
@@ -153,13 +120,19 @@ def set_notion_status(page_id, status):
                        timeout=15)
     r.raise_for_status()
 
-def get_all_offers():
+# ─── KEITARO ──────────────────────────────────────────────────────────────────
+def get_offers_by_group(group_name):
+    """Получить офферы из Keitaro по группе."""
     headers = {"Api-Key": KEITARO_KEY}
     r = requests.get(f"{KEITARO_URL}/admin_api/v1/offers", headers=headers, timeout=15)
     r.raise_for_status()
-    offers = r.json()
-    log.info(f"Keitaro: {len(offers)} офферов")
-    return offers
+    all_offers = r.json()
+
+    # Фильтруем по группе — ищем group_name в названии оффера
+    # Формат: "LN-XXXXX; KR; Brand; T20; ; affilate1@044.agency;"
+    filtered = [o for o in all_offers if group_name.lower() in o.get("name", "").lower()]
+    log.info(f"Офферов для группы '{group_name}': {len(filtered)} из {len(all_offers)}")
+    return filtered
 
 def get_stats_by_offer(offer_ids, days=90):
     if not offer_ids:
@@ -209,6 +182,7 @@ def get_today_stats_by_offer(offer_ids):
             }
     return result
 
+# ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 def tg_api(method, **kwargs):
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/{method}"
     r = requests.post(url, json=kwargs, timeout=15)
@@ -239,27 +213,39 @@ def main_keyboard():
     return {"keyboard": [[{"text": "🔍 Проверить капы"}], [{"text": "⚙️ Изменить настройки"}]],
             "resize_keyboard": True}
 
-def check_caps_for_user(buyer_notion_id, tag):
-    streams = get_streams_for_buyer(buyer_notion_id)
-    if not streams:
-        return "📭 Потоков не найдено", []
+# ─── ОТЧЁТ ────────────────────────────────────────────────────────────────────
+def check_caps_for_user(keitaro_group):
+    # 1. Все потоки из Notion
+    all_streams = get_all_streams()
 
-    all_offers = get_all_offers()
+    # 2. Офферы из Keitaro по группе байера
+    group_offers = get_offers_by_group(keitaro_group)
+    if not group_offers:
+        return f"❌ Офферы для группы '{keitaro_group}' не найдены в Keitaro", []
+
+    # 3. Матчим LN-XXXXX из офферов
     ln_to_offer_ids = {}
-    for o in all_offers:
+    for o in group_offers:
         name = o.get("name", "")
         m = re.match(r"^(LN-\d+)", name)
         if m:
             ln = m.group(1)
             ln_to_offer_ids.setdefault(ln, []).append(int(o["id"]))
 
-    all_offer_ids = set(oid for s in streams for oid in ln_to_offer_ids.get(s["ln_id"], []))
+    # 4. Оставляем только потоки которые есть в офферах Keitaro
+    streams = [s for s in all_streams if s["ln_id"] in ln_to_offer_ids]
+    log.info(f"Потоков с матчем в Keitaro: {len(streams)}")
 
+    if not streams:
+        return f"📭 Потоков для группы '{keitaro_group}' не найдено", []
+
+    # 5. Статистика
+    all_offer_ids = set(oid for s in streams for oid in ln_to_offer_ids.get(s["ln_id"], []))
     stats_all   = get_stats_by_offer(all_offer_ids, days=90)
     stats_today = get_today_stats_by_offer(all_offer_ids)
     stats_7d    = get_stats_by_offer(all_offer_ids, days=NO_TRAFFIC_DAYS)
 
-    lines = [f"📊 <b>Отчёт по капам</b> — {tag}\n"]
+    lines = [f"📊 <b>Отчёт по капам</b> — {keitaro_group}\n"]
     actions = []
 
     for s in streams:
@@ -268,10 +254,6 @@ def check_caps_for_user(buyer_notion_id, tag):
         cap_raw   = s["cap_raw"] if s["cap_raw"] else "?"
         offer_ids = ln_to_offer_ids.get(ln_id, [])
         link      = f'<a href="{s["notion_url"]}">{ln_id}</a>'
-
-        if not offer_ids:
-            lines.append(f"⚪ {link} — нет в Keitaro")
-            continue
 
         if not cap_info:
             total = sum(stats_all.get(o, {}).get("sales", 0) +
@@ -320,6 +302,7 @@ def build_keyboard(actions):
                              "callback_data": f"hold:{a['notion_id']}:{a['ln_id']}"}])
     return {"inline_keyboard": buttons} if buttons else None
 
+# ─── ХЭНДЛЕРЫ ─────────────────────────────────────────────────────────────────
 STATE_IDLE    = "idle"
 STATE_ASK_TAG = "ask_tag"
 
@@ -331,118 +314,32 @@ def handle_message(msg, users, states):
     if text == "/start":
         user = users.get(chat_id)
         if user:
-            tg_send(chat_id, f"👋 С возвращением, <b>{user['tag']}</b>!\n\nНажми кнопку чтобы проверить капы.",
-                    reply_markup=main_keyboard())
+            tg_send(chat_id,
+                f"👋 С возвращением!\n"
+                f"Группа Keitaro: <b>{user['group']}</b>\n\n"
+                f"Нажми кнопку чтобы проверить капы.",
+                reply_markup=main_keyboard())
         else:
             states[chat_id] = STATE_ASK_TAG
-            tg_send(chat_id, "👋 Привет! Введи свой тег (например: <code>tetriss_mb</code>):")
+            tg_send(chat_id,
+                "👋 Привет! Введи название своей группы офферов в Keitaro\n"
+                "(например: <code>tetriss_mb_frz</code>):")
         return
 
     if text == "⚙️ Изменить настройки":
         states[chat_id] = STATE_ASK_TAG
-        tg_send(chat_id, "Введи свой тег:")
-        return
-
-    if text == "/count":
-        user = users.get(chat_id)
-        if not user:
-            tg_send(chat_id, "Сначала введи тег через /start")
-            return
-        tg_send(chat_id, "⏳ Считаю...")
-        try:
-            uid = user["notion_id"]
-            url2 = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-            payload2 = {
-                "filter": {"or": [
-                    {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                    {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                    {"property": "Баер статус", "select": {"equals": "Холд"}},
-                ]},
-                "page_size": 100
-            }
-            total_all = 0
-            via_people = 0
-            via_raw = 0
-            sample_other_ids = set()
-            while True:
-                r2 = requests.post(url2, headers=NOTION_HEADERS, json=payload2, timeout=30)
-                r2.raise_for_status()
-                d2 = r2.json()
-                for pg in d2["results"]:
-                    total_all += 1
-                    resp = pg["properties"].get("Ответственный", {})
-                    people = resp.get("people", [])
-                    ids_in_people = [p.get("id") for p in people]
-                    if uid in ids_in_people:
-                        via_people += 1
-                    elif uid in str(resp):
-                        via_raw += 1
-                    else:
-                        for pid in ids_in_people:
-                            if pid:
-                                sample_other_ids.add(pid)
-                if not d2.get("has_more"):
-                    break
-                payload2["start_cursor"] = d2["next_cursor"]
-            sample = list(sample_other_ids)[:3]
-            tg_send(chat_id,
-                f"Всего активных: {total_all}\n"
-                f"Твоих через people[id]: {via_people}\n"
-                f"Твоих через raw текст: {via_raw}\n"
-                f"Примеры чужих UUID: {sample}"
-            )
-        except Exception as e:
-            tg_send(chat_id, f"Ошибка: {e}")
-        return
-
-    if text == "/debugraw":
-        tg_send(chat_id, "⏳ Сравниваю LN-13346 (видит) и LN-13530 (не видит)...")
-        try:
-            url3 = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-            msg_parts = []
-            for ln_check in ["LN-13346", "LN-13530"]:
-                payload3 = {
-                    "filter": {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                    "page_size": 100
-                }
-                found = None
-                while True:
-                    r3 = requests.post(url3, headers=NOTION_HEADERS, json=payload3, timeout=30)
-                    r3.raise_for_status()
-                    d3 = r3.json()
-                    for pg in d3["results"]:
-                        props3 = pg["properties"]
-                        ln3 = ""
-                        for key in ["userDefined:ID", "ID", ""]:
-                            p3 = props3.get(key, {})
-                            if p3.get("type") == "title" and p3.get("title"):
-                                ln3 = p3["title"][0]["plain_text"]
-                                break
-                        if ln3 == ln_check:
-                            found = props3
-                            break
-                    if found or not d3.get("has_more"):
-                        break
-                    payload3["start_cursor"] = d3["next_cursor"]
-                if found:
-                    resp3 = str(found.get("Ответственный", {}))[:300]
-                    msg_parts.append(f"{ln_check}:\n{resp3}")
-                else:
-                    msg_parts.append(f"{ln_check}: НЕ НАЙДЕН в DB query")
-            tg_send(chat_id, "\n\n".join(msg_parts))
-        except Exception as e:
-            tg_send(chat_id, f"Ошибка: {e}")
+        tg_send(chat_id, "Введи название группы офферов в Keitaro:")
         return
 
     if text == "🔍 Проверить капы":
         user = users.get(chat_id)
         if not user:
             states[chat_id] = STATE_ASK_TAG
-            tg_send(chat_id, "Сначала введи свой тег:")
+            tg_send(chat_id, "Сначала введи свою группу в Keitaro:")
             return
         tg_send(chat_id, "⏳ Загружаю данные...")
         try:
-            report, actions = check_caps_for_user(user["notion_id"], user["tag"])
+            report, actions = check_caps_for_user(user["group"])
             tg_send(chat_id, report, reply_markup=build_keyboard(actions))
         except Exception as e:
             log.error(f"check_caps: {e}")
@@ -450,15 +347,16 @@ def handle_message(msg, users, states):
         return
 
     if state == STATE_ASK_TAG:
-        tag = text.strip().lower()
-        if tag not in BUYERS:
-            known = ", ".join(f"<code>{t}</code>" for t in BUYERS.keys())
-            tg_send(chat_id, f"❌ Тег <b>{text}</b> не найден.\nДоступные: {known}")
+        group = text.strip()
+        if not group:
+            tg_send(chat_id, "Введи название группы:")
             return
-        users[chat_id] = {"tag": tag, "notion_id": BUYERS[tag]}
+        users[chat_id] = {"group": group}
         states[chat_id] = STATE_IDLE
         save_users(users)
-        tg_send(chat_id, f"✅ Готово! Тег: <b>{tag}</b>", reply_markup=main_keyboard())
+        tg_send(chat_id,
+            f"✅ Группа сохранена: <b>{group}</b>",
+            reply_markup=main_keyboard())
         return
 
     tg_send(chat_id, "Используй кнопки 👇", reply_markup=main_keyboard())
