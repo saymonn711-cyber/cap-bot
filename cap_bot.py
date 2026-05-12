@@ -73,13 +73,17 @@ def get_streams_for_buyer(buyer_notion_id):
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     payload = {
         "filter": {
-            "or": [
-                {"property": "Баер статус", "select": {"equals": "Запущен"}},
-                {"property": "Баер статус", "select": {"equals": "Не запущен"}},
-                {"property": "Баер статус", "select": {"equals": "Холд"}},
+            "and": [
+                {
+                    "or": [
+                        {"property": "Баер статус", "select": {"equals": "Запущен"}},
+                        {"property": "Баер статус", "select": {"equals": "Не запущен"}},
+                        {"property": "Баер статус", "select": {"equals": "Холд"}},
+                    ]
+                },
+                {"property": "Ответственный", "people": {"contains": buyer_notion_id}}
             ]
-        },
-        "page_size": 100
+        }
     }
     streams = []
     page_num = 0
@@ -92,11 +96,7 @@ def get_streams_for_buyer(buyer_notion_id):
         for page in data["results"]:
             props = page["properties"]
 
-            # Фильтр по Ответственному — ищем buyer_notion_id в любом представлении поля
-            resp_prop = props.get("Ответственный", {})
-            # Конвертируем всё поле в строку и ищем UUID байера
-            if buyer_notion_id not in str(resp_prop):
-                continue
+
 
             # Название потока
             ln_id = ""
