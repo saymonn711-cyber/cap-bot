@@ -323,10 +323,14 @@ def handle_message(msg, users, states):
                 "page_size": 100
             }
             found_notion = False
+            pages_checked = 0
+            total_records = 0
             while True:
                 r_n = requests.post(url_n, headers=NOTION_HEADERS, json=payload_n, timeout=30)
                 r_n.raise_for_status()
                 d_n = r_n.json()
+                pages_checked += 1
+                total_records += len(d_n["results"])
                 for page in d_n["results"]:
                     props = page["properties"]
                     ln_id = ""
@@ -338,14 +342,14 @@ def handle_message(msg, users, states):
                     if ln_id == ln:
                         st = props.get("Баер статус", {})
                         status = st.get("select", {}).get("name", "?") if st.get("select") else "?"
-                        results.append(f"✅ Notion: найден, статус={status}")
+                        results.append(f"✅ Notion: найден на стр.{pages_checked}, статус={status}")
                         found_notion = True
                         break
                 if found_notion or not d_n.get("has_more"):
                     break
                 payload_n["start_cursor"] = d_n["next_cursor"]
             if not found_notion:
-                results.append(f"❌ Notion: НЕ найден среди активных потоков")
+                results.append(f"❌ Notion: НЕ найден. Проверено страниц: {pages_checked}, записей: {total_records}")
             # 2. Проверяем Keitaro
             user = users.get(chat_id)
             group = user["group"] if user else "tetriss_mb_frz"
